@@ -15,11 +15,9 @@ I run the script via a cron job on a LXC on my home server. It runs every 10 min
 Running the script, it will first determine if the time you are running it is between sunrise/sunset times, it will then query the Birdweather API for a particular station. It gets the top 10 most seen birds for the last hour as well as the top 40 birds for the last day. It will send that data to an MQTT server in formatted form as well as JSON, they go to separate topics. A status message is output to the terminal and to log. 
 
 ## Prerequisites
-If you're here, you probably have python and pip installed someplace. You'll need to install the following modules as well:
+If you're here, you probably have python and pip installed someplace. You'll need to install the following modules as well: paho-mqtt, astral and pytz. Do this with:
 ```
-pip install paho-mqtt
-pip install astral
-pip install pytz
+pip3 install -r requirements.txt
 ```
 You need the python script `bw-check.py` as well as the file where all the configuration options are stored, `bw-check.ini`. 
 
