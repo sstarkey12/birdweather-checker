@@ -19,9 +19,9 @@ If you're here, you probably have python and pip installed someplace. You'll nee
 ```
 pip3 install -r requirements.txt
 ```
-You need the python script `bw-check.py` as well as the file where all the configuration options are stored, `bw-check.ini`. 
+You need the file where all the configuration options are stored, `bw-check.ini`. 
 
-You can create your own `bw-check.ini` file if you wish, or it will create one for you...probably hang a bit and throw an MQTT error, because the defaults are not applicable to you. Unless you live in my house. Honestly, this is probably the safest way, to run it the first time, so you know the file is created correctly.
+You can create your own `bw-check.ini` file if you wish, or it will create one for you...probably hang a bit and throw an MQTT error, because the defaults are not applicable to you. Unless you live in my house. Honestly, this is probably the safest way, to run it the first time, so you know the file is created correctly, then go in and change values to your own.
 
 ## First run
 After installing the required python modules you can hop into the directory and run it for the first time.
