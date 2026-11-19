@@ -8,15 +8,17 @@ import json
 from datetime import datetime, timedelta
 from configparser import ConfigParser
 import requests
+from requests.exceptions import Timeout
 from paho.mqtt import publish
 from astral import LocationInfo
 from astral.sun import sun
 import pytz
+import writecsv
 
 CONFIG_FILENAME = 'bw-check.ini'
 LOG_FILENAME = 'bw-check.log'
 
-status_msg = 'OK'
+# status_msg = 'OK'
 
 class StationData:
     """ Class to get data from Birdweather API
@@ -29,20 +31,30 @@ class StationData:
         json_name (str): Name of the JSON string to save data to
     """
     def __init__(self, url, station_id, **kwargs):
+        self.status_msg = 'OK'
         self.url = url
         self.station_id = station_id
         self.period = kwargs.get("period", 1.5)
         self.query = kwargs.get("query", "")
         self.json_name = kwargs.get("json_name", "")
         self.name, self.last_detect, self.species = self.station_data()
-        self.status_msg = 'OK'
+        
 
     def station_data(self):
         """Get station data from the Birdweather API
         Returns:
             tuple: Station name, last detection time, and species data
         """
-        data = json.loads(self.response().content)
+        try:
+            data = json.loads(self.response().content)
+        except AttributeError:
+            debug_print('NO DATA TO PARSE')
+            self.status_msg = 'NO DATA TO PARSE'
+            return None
+        except json.JSONDecodeError:
+            debug_print('JSON DECODE ERROR')
+            self.status_msg = 'JSON DECODE ERROR'
+            return None
         debug_print('Parsing station data')
         station_data = data['data']['station']
         name = station_data['name']
@@ -62,7 +74,15 @@ class StationData:
         """
         try:
             debug_print('Fetching data from Birdweather API')
-            response_data = requests.post(self.url, json={'query': self.query},timeout=10)
+            response_data = requests.post(self.url, json={'query': self.query},timeout=20)
+        except requests.exceptions.ConnectionError:
+            debug_print('CONNECTION ERROR')
+            self.status_msg = 'CONNECTION ERROR'
+            return None
+        except requests.exceptions.Timeout:
+            debug_print('TIMEOUT ERROR')
+            self.status_msg = 'TIMEOUT ERROR'
+            return None
         except requests.exceptions.RequestException as e:
             debug_print('ERROR FETCHING DATA: ' + str(e))
             self.status_msg = 'ERROR FETCHING DATA: ' + str(e)
@@ -99,6 +119,11 @@ class StationData:
         """Convert the species data to plain text format"""
         return '\n'.join(f'{bird_name}: {bird_count}' for bird_name,
                          bird_count in self.species.items())
+    
+    @property
+    def count_total(self):
+        """Count the total number of species detected"""
+        return sum(self.species.values())
 
 
 class Configuration:
@@ -255,98 +280,117 @@ def between_sunrise_sunset(latitude, longitude, timezone="America/Chicago",
     sunset_offset_time = s["sunset"] + timedelta(hours=float(set_offset))
     debug_print(f'Sunrise {rise_offset}: {sunrise_offset_time.strftime("%H:%M")}, ' \
                 f'Sunset +{set_offset}: {sunset_offset_time.strftime("%H:%M")}')
-    return bool(sunrise_offset_time < now_time < sunset_offset_time)
+    if bool(sunrise_offset_time < now_time < sunset_offset_time):
+        time_diff = str(now_time - sunrise_offset_time)
+        time_diff = time_diff.split(':')
+        if time_diff[0] == '0':
+            hour_diff = '1'
+        else:
+            hour_diff = time_diff[0]
+        return hour_diff
+    return False
+    # return bool(sunrise_offset_time < now_time < sunset_offset_time)
 
+def finish(online_status_msg, status_msg, hour_count, day_count, log_filename, debug):
+    debug_print('Writing to log file')
+    
+    last_status = debug_print(f'{online_status_msg} - {status_msg} '
+                            f'- {hour_count}/hr, {day_count}/day')
+    with open(log_filename, 'a', encoding='utf-8') as log_file:
+        log_file.write(last_status + '\n')
+    log_file.close()
+    if not debug:
+        print(last_status)
+    sys.exit()
 
-# set up the default config variables and load the configs in
-mqtt_vars = {'host': '192.168.1.1',
-                'port': '1883',
-                'username': 'mqtt-user',
-                'password': 'mqtt-password',
-                'topic': 'birdweather'}
-birdweather_vars = {'station_id': '2265',
-                'url': 'https://app.birdweather.com/graphql'}
-location_vars = {'lat': '46.69',
-                'lon': '-92.05',
-                'tz': 'America/Chicago'}
-config_vars = {'debug': 'False',
-               'limit_times' : 'True',
-               'sunrise_offset': '-1',
-               'sunset_offset': '1',}
-run = Configuration(CONFIG_FILENAME, config_vars, "default")
-location = Configuration(CONFIG_FILENAME, location_vars, "location")
-birdweather = Configuration(CONFIG_FILENAME, birdweather_vars, "birdweather")
-mqtt = Configuration(CONFIG_FILENAME, mqtt_vars, "mqtt")
-debug = bool(run.debug == 'True')
-# print the config info if we are in debug mode
-if debug:
-    debug_print('Debug mode is ON')
-    debug_print(f'Config file: {CONFIG_FILENAME}')
-    debug_print(f'Location: {location.config}')
-    debug_print(f'Birdweather: {birdweather.config}')
-    debug_print(f'MQTT: {mqtt.config}')
-# check if we should run the script based on sunrise and sunset times
-if run.limit_times == 'True':
-    if between_sunrise_sunset(location.lat, location.lon, location.tz,
-                              run.sunrise_offset, run.sunset_offset):
-        pass
+if __name__ == "__main__":
+    # set up the default config variables and load the configs in
+    mqtt_vars = {'host': '192.168.1.1',
+                    'port': '1883',
+                    'username': 'mqtt-user',
+                    'password': 'mqtt-password',
+                    'topic': 'birdweather'}
+    birdweather_vars = {'station_id': '2265',
+                    'url': 'https://app.birdweather.com/graphql'}
+    location_vars = {'lat': '46.69',
+                    'lon': '-92.05',
+                    'tz': 'America/Chicago'}
+    config_vars = {'debug': 'False',
+                'limit_times' : 'True',
+                'sunrise_offset': '-1',
+                'sunset_offset': '1',}
+    run = Configuration(CONFIG_FILENAME, config_vars, "default")
+    location = Configuration(CONFIG_FILENAME, location_vars, "location")
+    birdweather = Configuration(CONFIG_FILENAME, birdweather_vars, "birdweather")
+    mqtt = Configuration(CONFIG_FILENAME, mqtt_vars, "mqtt")
+    debug = bool(run.debug == 'True')
+    # print the config info if we are in debug mode
+    if debug:
+        debug_print('*****Debug mode is ON*****')
+        debug_print(f'Config file loaded: {CONFIG_FILENAME}')
+        # debug_print(f'Location: {location.config}')
+        # debug_print(f'Birdweather: {birdweather.config}')
+        # debug_print(f'MQTT: {mqtt.config}')
+    # check if we should run the script based on sunrise and sunset times
+    if run.limit_times == 'True':
+        time_diff = between_sunrise_sunset(location.lat, location.lon, location.tz,
+                                run.sunrise_offset, run.sunset_offset)
+        if time_diff == False:
+            debug_print('Not between sunrise and sunset, exiting')
+            sys.exit()
+    # create hourly and daily StationData objects from the queries
+    hourly_query = '{station(id: ' + birdweather.config["station_id"] + '), {coords{lat, lon}, ' \
+    'id, latestDetectionAt, name, topSpecies(limit: 10, period: {count: 1, unit: "hour"}) ' \
+    '{count, species {commonName}, speciesId}}}'
+    daily_query = '{station(id: ' + birdweather.config["station_id"] + '), {coords{lat, lon}, ' \
+    'id, latestDetectionAt, name, topSpecies(limit: 40, period: {count: ' + time_diff + ', unit: "hour"}) ' \
+    '{count, species {commonName}, speciesId}}}'
+    hour = StationData(
+        birdweather.url,
+        birdweather.station_id,
+        period=12,
+        query=hourly_query,
+        json_name='hourlytopspecies')
+    status_msg = hour.status_msg
+    if status_msg != 'OK':
+        finish('---', status_msg, '---', '---', LOG_FILENAME, debug)
+    day = StationData(
+        birdweather.url,
+        birdweather.station_id,
+        period=12,
+        query=daily_query,
+        json_name='dailytopspecies')
+    status_msg = day.status_msg
+    if status_msg != 'OK':
+        finish('---', status_msg, hour.count_total, '---', LOG_FILENAME, debug)
+    # check if the station is online
+    if hour.online():
+        online_status_msg = "ONLINE"
     else:
-        debug_print('Not between sunrise and sunset, exiting')
-        sys.exit()
-# create hourly and daily StationData objects from the queries
-hourly_query = '{station(id: ' + birdweather.config["station_id"] + '), {coords{lat, lon}, ' \
-'id, latestDetectionAt, name, topSpecies(limit: 10, period: {count: 1, unit: "hour"}) ' \
-'{count, species {commonName}, speciesId}}}'
-daily_query = '{station(id: ' + birdweather.config["station_id"] + '), {coords{lat, lon}, ' \
-'id, latestDetectionAt, name, topSpecies(limit: 40, period: {count: 1, unit: "day"}) ' \
-'{count, species {commonName}, speciesId}}}'
-hour = StationData(
-    birdweather.url,
-    birdweather.station_id,
-    period=12,
-    query=hourly_query,
-    json_name='hourlytopspecies')
-status_msg = hour.status_msg
-day = StationData(
-    birdweather.url,
-    birdweather.station_id,
-    period=12,
-    query=daily_query,
-    json_name='dailytopspecies')
-status_msg = day.status_msg
-# check if the station is online
-if hour.online():
-    online_status_msg = "ONLINE"
-else:
-    online_status_msg = "OFFLINE"
-# build and send the MQTT messages
-debug_print('Sending MQTT messages')
-time_now = datetime.now()
-time_now_iso = time_now.replace(microsecond=0).astimezone()
-mqtt_topic_base = mqtt.topic + '/' + hour.name
-mqtt_topic_mods = ['/stats', '/TopHourlySpecies', '/TopDailySpecies', '/TopHourlySpecies/json',
-                   '/TopDailySpecies/json', '/TopHourlySpecies/plain', '/TopDailySpecies/plain','']
-mqtt_payloads = ['{ "stationID":"' + hour.station_id
-                 + '", "lastDetect":"' + str(hour.last_detect)
-                 + '", "timeNow":"' + str(time_now_iso) + '" }',
-                        json.dumps(hour.species),
-                        json.dumps(day.species),
-                        json.dumps(hour.json),
-                        json.dumps(day.json),
-                        hour.plain,
-                        day.plain,
-                        online_status_msg]
-mqtt_msgs = []
-for i, mod in enumerate(mqtt_topic_mods):
-    build_tuple = (mqtt_topic_base + mod, mqtt_payloads[i], 0, False)
-    mqtt_msgs.append(build_tuple)
-server = MqttSender(mqtt.host, mqtt.port, mqtt.username, mqtt.password)
-status_msg = server.send(mqtt_msgs)
-# record log message
-debug_print('Writing to log file')
-last_status = debug_print(f'{online_status_msg} - {status_msg}')
-with open(LOG_FILENAME, 'a', encoding='utf-8') as log_file:
-    log_file.write(last_status + '\n')
-log_file.close()
-if not debug:
-    print(last_status)
+        online_status_msg = "OFFLINE"
+    # build and send the MQTT messages
+    debug_print('Sending MQTT messages')
+    time_now = datetime.now()
+    time_now_iso = time_now.replace(microsecond=0).astimezone()
+    mqtt_topic_base = mqtt.topic + '/' + hour.name
+    mqtt_topic_mods = ['/stats', '/TopHourlySpecies', '/TopDailySpecies', '/TopHourlySpecies/json',
+                    '/TopDailySpecies/json', '/TopHourlySpecies/plain', '/TopDailySpecies/plain','']
+    mqtt_payloads = ['{ "stationID":"' + hour.station_id
+                    + '", "lastDetect":"' + str(hour.last_detect)
+                    + '", "timeNow":"' + str(time_now_iso) + '" }',
+                            json.dumps(hour.species),
+                            json.dumps(day.species),
+                            json.dumps(hour.json),
+                            json.dumps(day.json),
+                            hour.plain,
+                            day.plain,
+                            online_status_msg]
+    mqtt_msgs = []
+    for i, mod in enumerate(mqtt_topic_mods):
+        build_tuple = (mqtt_topic_base + mod, mqtt_payloads[i], 0, False)
+        mqtt_msgs.append(build_tuple)
+    server = MqttSender(mqtt.host, mqtt.port, mqtt.username, mqtt.password)
+    status_msg = server.send(mqtt_msgs)
+    # record log message
+    writecsv.write_csv('testcounts.csv', [time_now, hour.count_total, day.count_total])
+    finish(online_status_msg, status_msg, hour.count_total, day.count_total, LOG_FILENAME, debug)
